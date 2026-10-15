@@ -1,0 +1,351 @@
+[
+  {
+    "id": "iryo_tab",
+    "type": "tab",
+    "label": "Iryo device ingestion",
+    "disabled": false,
+    "info": "ESP32 -> Node-RED -> Iryo backend.\nEndpoints: POST /iot/readings, GET /iot/ping, GET /iot/health.\nSet the environment variable IRYO_BACKEND_URL (no trailing slash)."
+  },
+  {
+    "id": "c1",
+    "type": "comment",
+    "z": "iryo_tab",
+    "name": "Readings from the device",
+    "info": "",
+    "x": 170,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "in_read",
+    "type": "http in",
+    "z": "iryo_tab",
+    "name": "POST /iot/readings",
+    "url": "/iot/readings",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 170,
+    "y": 90,
+    "wires": [
+      [
+        "fn_validate"
+      ]
+    ]
+  },
+  {
+    "id": "fn_validate",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Validate and shape",
+    "func": "// Checks the reading sent by the ESP32 and forwards it to the Iryo backend.\nconst b = msg.payload;\nconst bad = (status, code, text) => {\n    msg.statusCode = status;\n    msg.payload = { code: code, message: text };\n    return [null, msg];\n};\nconst isText = (v, max) => typeof v === \"string\" && v.trim().length > 0 && v.length <= max;\nconst inRange = (v, lo, hi) => typeof v === \"number\" && isFinite(v) && v >= lo && v <= hi;\nconst given = (v) => v !== undefined && v !== null;\n\nif (!b || typeof b !== \"object\" || Array.isArray(b)) return bad(400, \"BAD_PAYLOAD\", \"Body must be a JSON object.\");\nif (!isText(b.deviceId, 80)) return bad(400, \"BAD_PAYLOAD\", \"deviceId is required.\");\nif (!isText(b.deviceKey, 200)) return bad(400, \"BAD_PAYLOAD\", \"deviceKey is required.\");\nif (!inRange(b.spo2Percent, 50, 100)) return bad(400, \"BAD_PAYLOAD\", \"spo2Percent must be a number from 50 to 100.\");\nif (!inRange(b.temperatureC, 25, 45)) return bad(400, \"BAD_PAYLOAD\", \"temperatureC must be a number from 25 to 45.\");\nif (given(b.heartRateBpm) && !inRange(b.heartRateBpm, 30, 220)) return bad(400, \"BAD_PAYLOAD\", \"heartRateBpm must be a number from 30 to 220.\");\nif (given(b.heightCm) && !inRange(b.heightCm, 50, 250)) return bad(400, \"BAD_PAYLOAD\", \"heightCm must be a number from 50 to 250.\");\nif (given(b.measuredAt) && (typeof b.measuredAt !== \"string\" || isNaN(Date.parse(b.measuredAt)))) return bad(400, \"BAD_PAYLOAD\", \"measuredAt must be an ISO time.\");\nif (given(b.messageId) && !isText(b.messageId, 128)) return bad(400, \"BAD_PAYLOAD\", \"messageId is invalid.\");\n\nconst base = env.get(\"IRYO_BACKEND_URL\");\nif (!base) {\n    node.error(\"IRYO_BACKEND_URL is not set\");\n    return bad(503, \"UNAVAILABLE\", \"Service is not configured.\");\n}\n\nconst out = { deviceId: b.deviceId.trim(), spo2Percent: b.spo2Percent, temperatureC: b.temperatureC };\nif (given(b.heartRateBpm)) out.heartRateBpm = b.heartRateBpm;\nif (given(b.heightCm)) out.heightCm = b.heightCm;\nif (given(b.measuredAt)) out.measuredAt = b.measuredAt;\nif (given(b.messageId)) out.messageId = b.messageId;\n\nmsg.method = \"POST\";\nmsg.url = base.replace(/\\/+$/, \"\") + \"/api/ingest/measurements\";\nmsg.headers = { \"Content-Type\": \"application/json\", \"Accept\": \"application/json\", \"X-Device-Key\": b.deviceKey };\nmsg.requestTimeout = 65000;\nmsg.payload = out;\nreturn [msg, null];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 400,
+    "y": 90,
+    "wires": [
+      [
+        "req_ingest"
+      ],
+      [
+        "resp_read"
+      ]
+    ]
+  },
+  {
+    "id": "req_ingest",
+    "type": "http request",
+    "z": "iryo_tab",
+    "name": "Send to backend",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 650,
+    "y": 70,
+    "wires": [
+      [
+        "fn_map"
+      ]
+    ]
+  },
+  {
+    "id": "fn_map",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Map backend reply",
+    "func": "// Passes the backend answer back to the device. 5xx and non-JSON answers become 502 so the device retries.\nconst status = Number(msg.statusCode) || 502;\nconst body = msg.payload;\nif (status >= 500 || typeof body !== \"object\" || body === null) {\n    msg.statusCode = 502;\n    msg.payload = { code: \"BACKEND_UNAVAILABLE\", message: \"The server is not ready. Retry shortly.\" };\n    return msg;\n}\nmsg.statusCode = status;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 870,
+    "y": 70,
+    "wires": [
+      [
+        "resp_read"
+      ]
+    ]
+  },
+  {
+    "id": "resp_read",
+    "type": "http response",
+    "z": "iryo_tab",
+    "name": "Reply to device",
+    "statusCode": "",
+    "headers": {},
+    "x": 1100,
+    "y": 90,
+    "wires": []
+  },
+  {
+    "id": "catch_ingest",
+    "type": "catch",
+    "z": "iryo_tab",
+    "name": "Backend unreachable",
+    "scope": [
+      "req_ingest"
+    ],
+    "uncaught": false,
+    "x": 650,
+    "y": 140,
+    "wires": [
+      [
+        "fn_down"
+      ]
+    ]
+  },
+  {
+    "id": "fn_down",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Tell device to retry",
+    "func": "// The backend did not answer (for example it is asleep). Tell the device to retry.\nnode.warn(\"Backend unreachable: \" + (msg.error && msg.error.message));\nmsg.statusCode = 502;\nmsg.payload = { code: \"BACKEND_UNAVAILABLE\", message: \"The server is waking up. Retry shortly.\" };\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 870,
+    "y": 140,
+    "wires": [
+      [
+        "resp_read"
+      ]
+    ]
+  },
+  {
+    "id": "c2",
+    "type": "comment",
+    "z": "iryo_tab",
+    "name": "Wake-up check from the device",
+    "info": "",
+    "x": 180,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "in_ping",
+    "type": "http in",
+    "z": "iryo_tab",
+    "name": "GET /iot/ping",
+    "url": "/iot/ping",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 270,
+    "wires": [
+      [
+        "fn_pingprep"
+      ]
+    ]
+  },
+  {
+    "id": "fn_pingprep",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Check backend",
+    "func": "// Wakes the backend: asks its health endpoint. The device calls this until backend is true.\nconst base = env.get(\"IRYO_BACKEND_URL\");\nif (!base) {\n    msg.statusCode = 200;\n    msg.payload = { ok: true, service: \"nodered\", backend: false };\n    return [null, msg];\n}\nmsg.method = \"GET\";\nmsg.url = base.replace(/\\/+$/, \"\") + \"/api/health\";\nmsg.headers = { \"Accept\": \"application/json\" };\nmsg.requestTimeout = 8000;\nmsg.payload = \"\";\nreturn [msg, null];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 380,
+    "y": 270,
+    "wires": [
+      [
+        "req_health"
+      ],
+      [
+        "resp_ping"
+      ]
+    ]
+  },
+  {
+    "id": "req_health",
+    "type": "http request",
+    "z": "iryo_tab",
+    "name": "Backend /api/health",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 640,
+    "y": 250,
+    "wires": [
+      [
+        "fn_pingreply"
+      ]
+    ]
+  },
+  {
+    "id": "fn_pingreply",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Build ping reply",
+    "func": "// Always answers 200 so the device knows Node-RED itself is awake. backend says whether the backend is ready.\nconst ok = Number(msg.statusCode) === 200 && msg.payload && typeof msg.payload === \"object\" && msg.payload.status === \"ok\";\nmsg.statusCode = 200;\nmsg.payload = { ok: true, service: \"nodered\", backend: ok };\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 870,
+    "y": 250,
+    "wires": [
+      [
+        "resp_ping"
+      ]
+    ]
+  },
+  {
+    "id": "resp_ping",
+    "type": "http response",
+    "z": "iryo_tab",
+    "name": "Reply to device",
+    "statusCode": "",
+    "headers": {},
+    "x": 1100,
+    "y": 270,
+    "wires": []
+  },
+  {
+    "id": "catch_health",
+    "type": "catch",
+    "z": "iryo_tab",
+    "name": "Backend asleep",
+    "scope": [
+      "req_health"
+    ],
+    "uncaught": false,
+    "x": 640,
+    "y": 320,
+    "wires": [
+      [
+        "fn_pingdown"
+      ]
+    ]
+  },
+  {
+    "id": "fn_pingdown",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Backend not ready",
+    "func": "msg.statusCode = 200;\nmsg.payload = { ok: true, service: \"nodered\", backend: false };\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 870,
+    "y": 320,
+    "wires": [
+      [
+        "resp_ping"
+      ]
+    ]
+  },
+  {
+    "id": "c3",
+    "type": "comment",
+    "z": "iryo_tab",
+    "name": "Health check for Render and cron jobs",
+    "info": "",
+    "x": 200,
+    "y": 400,
+    "wires": []
+  },
+  {
+    "id": "in_health",
+    "type": "http in",
+    "z": "iryo_tab",
+    "name": "GET /iot/health",
+    "url": "/iot/health",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 450,
+    "wires": [
+      [
+        "fn_health"
+      ]
+    ]
+  },
+  {
+    "id": "fn_health",
+    "type": "function",
+    "z": "iryo_tab",
+    "name": "Answer ok",
+    "func": "// Cheap check for Render and cron jobs. Does not touch the backend.\nmsg.statusCode = 200;\nmsg.payload = { ok: true, service: \"nodered\" };\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 400,
+    "y": 450,
+    "wires": [
+      [
+        "resp_health"
+      ]
+    ]
+  },
+  {
+    "id": "resp_health",
+    "type": "http response",
+    "z": "iryo_tab",
+    "name": "Reply",
+    "statusCode": "",
+    "headers": {},
+    "x": 630,
+    "y": 450,
+    "wires": []
+  }
+]
